@@ -49,7 +49,6 @@ pyink-annotation-pragmas = [
   "@test",
 ]
 pyink-ipynb-indentation = 2
-pyink-ipynb-unicode-escape = true
 target-version = []
 
 [build-system]
