@@ -594,11 +594,11 @@ class CarfacTest(parameterized.TestCase):
     fs = 22050.0
     fp = 1000.0  # Probe tone
     t = np.arange(0, 2, 1 / fs)  # 2s of tone
-    sinusoid = 1e-1 * np.sin(2 * np.pi * t * fp)
+    sinusoid = 1e-1 * np.sin(2 * np.pi * t * fp) * 10 ** ((107-94)/20) # scale tone to 94dB SPL @RMS=1
 
     t = np.arange(0, 0.5, 1 / fs)
     impulse = np.zeros(t.shape)
-    impulse[0] = 1e-4
+    impulse[0] = 1e-4 * 10 ** ((107-94)/20) # scale impulse to 94dB SPL @RMS=1
 
     cfp = carfac.design_carfac(fs=fs, ihc_style=ihc_style)
     cfp = carfac.carfac_init(cfp)
@@ -815,7 +815,7 @@ class CarfacTest(parameterized.TestCase):
     fs = 22050.0
     t = np.arange(0, 0.1, 1 / fs)  # Short impulse input.
     impulse = np.zeros(t.shape)
-    impulse[0] = 1e-4
+    impulse[0] = 1e-4 * 10 ** ((107-94)/20) # scale impulse to 94dB SPL @ RMS = 1
 
     cfp = carfac.design_carfac(fs=fs)
     cfp = carfac.carfac_init(cfp)
@@ -873,7 +873,7 @@ class CarfacTest(parameterized.TestCase):
     fs = 22050.0
     t = np.arange(0, 1, 1 / fs)  # A second of noise.
     amplitude = 1e-4  # -80 dBFS, around 20 or 30 dB SPL
-    noise = amplitude * np.random.randn(len(t))
+    noise = amplitude * np.random.randn(len(t)) * 10 ** ((107-94)/20) # scale noise to 94dB SPL @ RMS=1
     cfp = carfac.design_carfac(fs=fs)
     cfp = carfac.carfac_init(cfp)
     # Run the healthy case with low-level noise.
@@ -914,7 +914,7 @@ class CarfacTest(parameterized.TestCase):
     fs = 22050.0
     t = np.arange(0, 1, 1 / fs)  # A second of noise.
     amplitude = 1e-3  # -70 dBFS, around 30 or 40 dB SPL
-    noise = amplitude * np.random.randn(len(t))
+    noise = amplitude * np.random.randn(len(t)) * 10 ** ((107-94)/20) # scale noise to 94 dB SPL @ RMS=1
     two_chan_noise = np.zeros((len(t), 2))
     two_chan_noise[:, 0] = noise
     two_chan_noise[:, 1] = noise
@@ -950,7 +950,7 @@ class CarfacTest(parameterized.TestCase):
     freqs = freqs.reshape(len(freqs), 1)
     c_major_chord = amplitude * np.sum(
         np.sin(2 * np.pi * np.matmul(freqs, t_prime)), 0
-    )
+    ) * 10 ** ((107-94)/20) # scale chord to 94 dB SPL @ RMS=1
 
     two_chan_noise = np.zeros((len(t), 2))
     two_chan_noise[:, 0] = c_major_chord

@@ -391,7 +391,8 @@ class CarfacJaxTest(parameterized.TestCase):
     n_samp = 200
     n_ears = 1
     random_generator = jax.random.PRNGKey(random_seed)
-    run_seg_input = jax.random.normal(random_generator, (n_samp, n_ears))
+    run_seg_input = jax.random.normal(random_generator, (n_samp, n_ears)) * 10 ** ((107-94)/20)
+    # scale input to 94 SPL @ RMS=1
 
     # Copy the state first.
     state_jax_copied = copy.deepcopy(state_jax)
@@ -454,7 +455,8 @@ class CarfacJaxTest(parameterized.TestCase):
     # should be bigger than 64 (i.e. `prod(AgcDesignParameters.decimation)`).
     n_samp = 200
     random_generator = jax.random.PRNGKey(random_seed)
-    run_seg_input = jax.random.normal(random_generator, (n_samp, n_ears))
+    run_seg_input = jax.random.normal(random_generator, (n_samp, n_ears)) * 10 ** ((107-94)/20)
+    # scale input to 94 dB SPL @ RMS=1
 
     # Only tests the JITted version because this is what we will use.
     naps_jax, _, state_jax, bm_jax, seg_ohc_jax, seg_agc_jax = (

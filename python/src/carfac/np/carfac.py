@@ -1600,6 +1600,9 @@ def run_segment(
   the input_waves are assumed to be sampled at the same rate as the
   CARFAC is designed for; a resampling may be needed before calling this.
 
+  input_waves are considered as being in Pascals and therefore should equal
+  94db SPL where their RMS is 1.
+
   The function works as an outer iteration on time, updating all the
   filters and AGC states concurrently, so that the different channels can
   interact easily.  The inner loops are over filterbank channels, and
@@ -1607,7 +1610,7 @@ def run_segment(
 
   Args:
     cfp: a structure that descirbes everything we know about this CARFAC.
-    input_waves: the audio input
+    input_waves: the audio input in Pascals.
     open_loop: whether to run CARFAC without the feedback.
     linear_car (new over Matlab): use CAR filters without OHC effects.
 
@@ -1623,6 +1626,10 @@ def run_segment(
 
   if len(input_waves.shape) < 2:
     input_waves = np.reshape(input_waves, (-1, 1))
+
+  # scale input_waves from 94dB SPL @ RMS=1 to 107dB SPL @ RMS=1
+  input_waves = input_waves * 10 ** ((94-107)/20)
+
   [n_samp, n_ears] = input_waves.shape
 
   if n_ears != cfp.n_ears:
