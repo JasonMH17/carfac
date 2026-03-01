@@ -101,6 +101,7 @@ class CarfacJaxTest(parameterized.TestCase):
     hypers = carfac_jax.CarfacHypers()
     hypers.ears = [
         carfac_jax.EarHypers(
+            input_scale=94,
             n_ch=0,
             pole_freqs=jnp.array([]),
             max_channels_per_octave=0.0,

@@ -1250,6 +1250,7 @@ class CarfacCoeffs:
 @dataclasses.dataclass
 class CarfacParams:
   fs: float
+  input_scale: int
   max_channels_per_octave: float
   car_params: CarParams
   agc_params: AgcParams
@@ -1262,6 +1263,7 @@ class CarfacParams:
 
 
 def design_carfac(
+    input_scale: int = 94,
     n_ears: int = 1,
     fs: float = 22050,
     car_params: Optional[CarParams] = None,
@@ -1290,6 +1292,8 @@ def design_carfac(
   make 96 channels at default fs = 22050, 114 channels at 44100.
 
   Args:
+    input_scale: scale for input waves. By default, input is expected in Pascals i.e. 94 dB SPL @ RMS=1,
+      while CARFAC input is considered as 107 dB SPL @ RMS=1
     n_ears: How many ears (1 or 2, in general) in the simulation
     fs: is sample rate (per second)
     car_params: bundles all the pole-zero filter cascade parameters
@@ -1362,6 +1366,7 @@ def design_carfac(
 
   cfp = CarfacParams(
       fs,
+      input_scale,
       max_channels_per_octave,
       car_params,
       agc_params,
@@ -1628,7 +1633,7 @@ def run_segment(
     input_waves = np.reshape(input_waves, (-1, 1))
 
   # scale input_waves from 94dB SPL @ RMS=1 to 107dB SPL @ RMS=1
-  input_waves = input_waves * 10 ** ((94-107)/20)
+  input_waves = input_waves * 10 ** ((cfp.input_scale-107)/20)
 
   [n_samp, n_ears] = input_waves.shape
 
