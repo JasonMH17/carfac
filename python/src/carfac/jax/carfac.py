@@ -944,7 +944,7 @@ class EarDesignParameters:
 class EarHypers:
   """Hyperparameters (tagged as static in `jax.jit`) of 1 ear."""
 
-  input_scale: int
+  input_scale_dbspl: float
   n_ch: int
   pole_freqs: jnp.ndarray
   max_channels_per_octave: float
@@ -957,7 +957,7 @@ class EarHypers:
   # Reference: https://jax.readthedocs.io/en/latest/pytrees.html
   def tree_flatten(self):  # pylint: disable=missing-function-docstring
     children = (
-        self.input_scale,
+        self.input_scale_dbspl,
         self.n_ch,
         self.pole_freqs,
         self.max_channels_per_octave,
@@ -967,7 +967,7 @@ class EarHypers:
         self.syn,
     )
     aux_data = (
-        'input_scale',
+        'input_scale_dbspl',
         'n_ch',
         'pole_freqs',
         'max_channels_per_octave',
@@ -989,7 +989,7 @@ class EarHypers:
     # assigned to a different array with exactly the same value. We think such
     # case should be very rare in usage.
     return (
-        self.input_scale,
+        self.input_scale_dbspl,
         self.n_ch,
         id(self.pole_freqs),
         self.max_channels_per_octave,
@@ -1059,24 +1059,24 @@ class CarfacDesignParameters:
   """All the parameters set manually for designing CARFAC."""
 
   fs: float = 22050.0
-  input_scale: int = 94
+  input_scale_dbspl: float = 94
   ears: List[EarDesignParameters] = dataclasses.field(
       default_factory=lambda: [EarDesignParameters()]
   )
 
-  def __init__(self, fs=22050.0, input_scale=94, n_ears=1, use_delay_buffer=False):
+  def __init__(self, fs=22050.0, input_scale_dbspl=94, n_ears=1, use_delay_buffer=False):
     """Initialize the Design Parameters dataclass.
 
     Args:
       fs: Samples per second.
-      input_scale: scale for input waves. By default, input is expected in Pascals i.e. 94 dB SPL @ RMS=1,
-        while CARFAC input is considered as 107 dB SPL @ RMS=1
+      input_scale_dbspl: scale in dB SPL for input waves (default: 94). The default value expects input in
+        pascals i.e. 94 dB SPL (for RMS=1), while CARFAC v1 and v2 use an input scale of 107 dB SPL (for RMS=1)
       n_ears: Number of ears to design for.
       use_delay_buffer: Whether to use the delay buffer implementation for the
         car_step.
     """
     self.fs = fs
-    self.input_scale = input_scale
+    self.input_scale_dbspl = input_scale_dbspl
     self.ears = [
         EarDesignParameters(
             car=CarDesignParameters(use_delay_buffer=use_delay_buffer)
@@ -1771,7 +1771,7 @@ def design_and_init_carfac(
   state = CarfacState()
 
   for ear, ear_params in enumerate(params.ears):
-    input_scale = params.input_scale
+    input_scale_dbspl = params.input_scale_dbspl
     # first figure out how many filter stages (PZFC/CARFAC channels):
     pole_hz = ear_params.car.first_pole_theta * params.fs / (2 * math.pi)
     n_ch = 0
@@ -1807,7 +1807,7 @@ def design_and_init_carfac(
     )
 
     ear_hypers = EarHypers(
-        input_scale=input_scale,
+        input_scale_dbspl=input_scale_dbspl,
         n_ch=n_ch,
         pole_freqs=pole_freqs,
         max_channels_per_octave=max_channels_per_octave,
@@ -2424,8 +2424,8 @@ def run_segment(
   the input_waves are assumed to be sampled at the same rate as the
   CARFAC is designed for; a resampling may be needed before calling this.
 
-  input_waves are considered as being in Pascals and therefore should equal
-  94db SPL where their RMS is 1.
+  input_waves are considered as being in pascals i.e. their level is
+  94db SPL when their RMS equals 1.
 
   The function works as an outer iteration on time, updating all the
   filters and AGC states concurrently, so that the different channels can
@@ -2433,7 +2433,7 @@ def run_segment(
   this level should be kept efficient.
 
   Args:
-    input_waves: the audio input in Pascals.
+    input_waves: the audio input in pascals with default input_scale_dbspl.
     hypers: all the coefficients of the model. It will be passed to all the
       JIT'ed functions as static variables.
     weights: all the trainable weights. It will not be changed.
@@ -2453,7 +2453,7 @@ def run_segment(
     input_waves = jnp.reshape(input_waves, (-1, 1))
 
   # scale input_waves from specified dB SPL @ RMS=1 to 107dB SPL @ RMS=1
-  input_waves = input_waves * 10 ** ((hypers.ears[0].input_scale-107)/20)
+  input_waves = input_waves * 10 ** ((hypers.ears[0].input_scale_dbspl-107.)/20.)
 
   n_ears = input_waves.shape[1]
   n_fibertypes = SynDesignParameters.n_classes
@@ -2611,7 +2611,7 @@ def run_segment_jit(
   the cache when needed.
 
   Args:
-    input_waves: the audio input in Pascals.
+    input_waves: the audio input in pascals with default input_scale_dbspl.
     hypers: all the coefficients of the model. It will be passed to all the
       JIT'ed functions as static variables.
     weights: all the trainable weights. It will not be changed.
@@ -2653,7 +2653,7 @@ def run_segment_jit_in_chunks_notraceable(
   20 percent on a regular CPU.
 
   Args:
-    input_waves: The audio input in Pascals.
+    input_waves: The audio input in pascals with defualt input_scale_dbspl.
     hypers: All the coefficients of the model. It will be passed to all the
       JIT'ed functions as static variables.
     weights: All the trainable weights. It will not be changed.

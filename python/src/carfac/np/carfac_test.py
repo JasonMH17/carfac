@@ -1,4 +1,4 @@
-"""Tests for carfac."""
+"""Tests for Numpy carfac."""
 
 import math
 from typing import List, Tuple
