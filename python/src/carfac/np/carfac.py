@@ -1615,7 +1615,7 @@ def run_segment(
 
   Args:
     cfp: a structure that descirbes everything we know about this CARFAC.
-    input_waves: the audio input in pascals.
+    input_waves: the audio input in pascals with default input_scale_dbspl.
     open_loop: whether to run CARFAC without the feedback.
     linear_car (new over Matlab): use CAR filters without OHC effects.
 
