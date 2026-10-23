@@ -247,8 +247,19 @@ class CarfacJaxTest(parameterized.TestCase):
       self.container_comparison(
           weights_jax.ears[ear_idx].car, ear_params_np.car_coeffs
       )
+      # The impairment weights are JAX only and designed healthy.
       self.container_comparison(
-          weights_jax.ears[ear_idx].ihc, ear_params_np.ihc_coeffs
+          weights_jax.ears[ear_idx].ihc,
+          ear_params_np.ihc_coeffs,
+          exclude_keys={'drive_gain', 'battery'},
+      )
+      chex.assert_trees_all_equal(
+          weights_jax.ears[ear_idx].ihc.drive_gain,
+          jnp.ones(hypers_jax.ears[ear_idx].n_ch),
+      )
+      chex.assert_trees_all_equal(
+          weights_jax.ears[ear_idx].ihc.battery,
+          jnp.ones(hypers_jax.ears[ear_idx].n_ch),
       )
       self.container_comparison(
           hypers_jax.ears[ear_idx].ihc,
@@ -780,6 +791,156 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
     grad = jax.grad(loss)(weights.ears[0].syn.v_halfs)
     self.assertTrue(jnp.all(jnp.isfinite(grad)))
     self.assertGreater(float(jnp.max(jnp.abs(grad))), 0.0)
+
+  def _replace_ihc(self, weights, **kwargs):
+    """Returns weights with ear 0's IHC weights replaced by `kwargs`."""
+    ear_weights = dataclasses.replace(
+        weights.ears[0], ihc=dataclasses.replace(weights.ears[0].ihc, **kwargs)
+    )
+    return dataclasses.replace(weights, ears=[ear_weights])
+
+  @parameterized.parameters(
+      'just_hwr', 'one_cap', 'two_cap', 'two_cap_with_syn'
+  )
+  @jax.numpy_dtype_promotion('strict')
+  def test_drive_gain_scales_bm_out(self, ihc_style):
+    """A drive gain should act exactly like scaling bm_out."""
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = ihc_style
+    hypers, weights, state = carfac_jax.design_and_init_carfac(params)
+    n_ch = hypers.ears[0].n_ch
+    drive_gain = jnp.linspace(0.25, 1.0, n_ch)
+    impaired = self._replace_ihc(weights, drive_gain=drive_gain)
+    bm_out = 0.1 * jax.random.normal(jax.random.PRNGKey(0), (n_ch,))
+
+    out, v_recep, new_state = carfac_jax.ihc_step(
+        bm_out,
+        hypers.ears[0].ihc,
+        impaired.ears[0].ihc,
+        copy.deepcopy(state.ears[0].ihc),
+    )
+    expected = carfac_jax.ihc_step(
+        drive_gain * bm_out,
+        hypers.ears[0].ihc,
+        weights.ears[0].ihc,
+        copy.deepcopy(state.ears[0].ihc),
+    )
+    chex.assert_trees_all_close((out, v_recep, new_state), expected)
+
+  @parameterized.parameters('two_cap', 'two_cap_with_syn')
+  @jax.numpy_dtype_promotion('strict')
+  def test_resolve_ihc_rest_healthy_is_noop(self, ihc_style):
+    """A healthy design is already at rest, so nothing should change."""
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = ihc_style
+    hypers, weights, state = carfac_jax.design_and_init_carfac(params)
+    new_state = carfac_jax.resolve_ihc_rest(hypers, weights, state)
+    chex.assert_trees_all_close(new_state, state, rtol=1e-5)
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_resolve_ihc_rest_is_fixed_point_at_rest(self):
+    """With a lower battery, the re-solved IHC should hold its rest."""
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = 'two_cap'
+    hypers, weights, state = carfac_jax.design_and_init_carfac(params)
+    n_ch = hypers.ears[0].n_ch
+    battery = jnp.linspace(0.5, 1.0, n_ch)
+    weights = self._replace_ihc(weights, battery=battery)
+    state = carfac_jax.resolve_ihc_rest(hypers, weights, state)
+
+    ihc_state = copy.deepcopy(state.ears[0].ihc)
+    for _ in range(100):
+      _, v_recep, ihc_state = carfac_jax.ihc_step(
+          jnp.zeros(n_ch), hypers.ears[0].ihc, weights.ears[0].ihc, ihc_state
+      )
+    rest_cap1 = weights.ears[0].ihc.rest_cap1
+    chex.assert_trees_all_close(
+        v_recep, (battery - 1) * (1 - rest_cap1), atol=1e-6
+    )
+    ihc_state.ihc_accum = state.ears[0].ihc.ihc_accum
+    chex.assert_trees_all_close(
+        ihc_state, state.ears[0].ihc, rtol=1e-5, atol=1e-6
+    )
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_battery_silence_nap_is_zero(self):
+    """With a lower battery and both re-solves, silence should give 0 NAP."""
+    hypers, weights, state = self._design_syn_carfac()
+    n_ch = hypers.ears[0].n_ch
+    weights = self._replace_ihc(weights, battery=jnp.linspace(0.5, 1.0, n_ch))
+    weights, state = carfac_jax.resolve_syn_rest(weights, state)
+    state = carfac_jax.resolve_ihc_rest(hypers, weights, state)
+    naps, *_ = carfac_jax.run_segment(
+        jnp.zeros((1000, 1)), hypers, weights, state
+    )
+    chex.assert_trees_all_close(naps, jnp.zeros_like(naps), atol=1e-5)
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_battery_equals_receptor_gain_plus_shift(self):
+    """A battery E should match synapse widths and midpoints scaled by 1/E.
+
+    The two-cap IHC with battery E gives v_recep = E * v + (E - 1) * V_rest,
+    where v is the healthy v_recep and V_rest = 1 - rest_cap1. The release
+    sigmoid sees the same input with v_widths / E and
+    v_halfs' = (v_halfs + (1 - E) * V_rest) / E, so the NAPs should match.
+    """
+    hypers, weights, state = self._design_syn_carfac()
+    battery = 0.5
+    n_ch = hypers.ears[0].n_ch
+    input_waves = 0.05 * jax.random.normal(jax.random.PRNGKey(0), (2000, 1))
+
+    with_battery = self._replace_ihc(weights, battery=jnp.full(n_ch, battery))
+    with_battery, battery_state = carfac_jax.resolve_syn_rest(
+        with_battery, state
+    )
+    battery_state = carfac_jax.resolve_ihc_rest(
+        hypers, with_battery, battery_state
+    )
+    battery_naps, *_ = carfac_jax.run_segment(
+        input_waves, hypers, with_battery, battery_state
+    )
+
+    syn = weights.ears[0].syn
+    v_rest = 1 - weights.ears[0].ihc.rest_cap1
+    rescaled = dataclasses.replace(
+        weights.ears[0],
+        syn=dataclasses.replace(
+            syn,
+            v_widths=syn.v_widths / battery,
+            v_halfs=(syn.v_halfs + (1 - battery) * v_rest) / battery,
+        ),
+    )
+    rescaled = dataclasses.replace(weights, ears=[rescaled])
+    rescaled, rescaled_state = carfac_jax.resolve_syn_rest(rescaled, state)
+    rescaled_naps, *_ = carfac_jax.run_segment(
+        input_waves, hypers, rescaled, rescaled_state
+    )
+    # Equal up to float32 rounding, which the AGC loop carries over time.
+    chex.assert_trees_all_close(
+        battery_naps, rescaled_naps, rtol=5e-4, atol=1e-5
+    )
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_drive_gain_and_battery_grad(self):
+    """Gradients should flow to drive_gain and battery through the re-solves."""
+    hypers, weights, state = self._design_syn_carfac()
+    input_waves = 0.01 * jax.random.normal(jax.random.PRNGKey(0), (100, 1))
+
+    @jax.jit
+    def loss(drive_gain, battery):
+      w = self._replace_ihc(weights, drive_gain=drive_gain, battery=battery)
+      w, s = carfac_jax.resolve_syn_rest(w, state)
+      s = carfac_jax.resolve_ihc_rest(hypers, w, s)
+      naps, *_ = carfac_jax.run_segment(input_waves, hypers, w, s)
+      return jnp.sum(naps**2)
+
+    ihc = weights.ears[0].ihc
+    grads = jax.grad(loss, argnums=(0, 1))(
+        0.8 * ihc.drive_gain, 0.8 * ihc.battery
+    )
+    for grad in grads:
+      self.assertTrue(jnp.all(jnp.isfinite(grad)))
+      self.assertGreater(float(jnp.max(jnp.abs(grad))), 0.0)
 
 
 if __name__ == '__main__':

@@ -469,6 +469,12 @@ class IhcWeights:
   out_rate: float | jnp.ndarray = 0.0
   in_rate: float = 0.0
 
+  # Impairment weights, 1 when healthy. `drive_gain` scales `bm_out` before the
+  # detection nonlinearity. `battery` is the voltage cap1 recharges toward in
+  # the two-cap IHC, so lowering it reduces the receptor driving force.
+  drive_gain: float | jnp.ndarray = 1.0
+  battery: float | jnp.ndarray = 1.0
+
 
 # States can be donated so we must use default_factory to create a freshly new
 # one every time.
@@ -931,10 +937,10 @@ def resolve_syn_rest(
   """Re-solves each synapse's resting output for its current weights.
 
   `spont_sub` and the synapse start state are designed for the healthy
-  `v_halfs` and `n_fibers`. After changing `v_halfs`, `n_fibers` or
-  `agc_weights`, call this so the synapse output rests at 0 in silence again.
-  Pure and differentiable, so safe under `jax.jit`. Ears without a synapse are
-  passed through unchanged.
+  `v_halfs` and `n_fibers`. After changing `v_halfs`, `n_fibers`,
+  `agc_weights` or the IHC `battery`, call this so the synapse output rests at
+  0 in silence again. Pure and differentiable, so safe under `jax.jit`. Ears
+  without a synapse are passed through unchanged.
 
   Args:
     weights: The weights, whose synapse `spont_sub` is re-solved.
@@ -948,9 +954,14 @@ def resolve_syn_rest(
   for ear_weights, ear_state in zip(weights.ears, state.ears):
     syn_weights = ear_weights.syn
     if syn_weights is not None:
-      # Steady state of `syn_step` with `v_recep` at 0: q = a1 * r and
+      # The two-cap IHC rests at cap1 = battery * rest_cap1, so v_recep rests
+      # at -(1 - battery) * (1 - rest_cap1), which is 0 when healthy.
+      ihc_weights = ear_weights.ihc
+      v_rest = (ihc_weights.battery - 1) * (1 - ihc_weights.rest_cap1)
+      # Steady state of `syn_step` at that v_recep: q = a1 * r and
       # r = (1 - q) * s, so q = a1 * s / (1 + a1 * s).
-      s = jax.nn.sigmoid(-syn_weights.v_halfs / syn_weights.v_widths)
+      v_rest = jnp.reshape(v_rest, (-1, 1))  # Per channel, or one for all.
+      s = jax.nn.sigmoid((v_rest - syn_weights.v_halfs) / syn_weights.v_widths)
       q = syn_weights.a1 * s / (1 + syn_weights.a1 * s)
       p = syn_weights.a2 * (1 - q) * s
       p = jnp.broadcast_to(p, syn_weights.n_fibers.shape)
@@ -972,6 +983,56 @@ def resolve_syn_rest(
       dataclasses.replace(weights, ears=ears_weights),
       dataclasses.replace(state, ears=ears_state),
   )
+
+
+def resolve_ihc_rest(
+    hypers: CarfacHypers, weights: CarfacWeights, state: CarfacState
+) -> CarfacState:
+  """Re-solves each two-cap IHC's resting state for its current `battery`.
+
+  The IHC start state is designed for a battery of 1. After changing
+  `battery`, call this so the two-cap IHC starts at its new rest instead of
+  relaxing to it. The rest is scaled from `rest_cap1`, so this assumes
+  `rest_cap1` is still the designed rest for `in1_rate` and `out1_rate`, as
+  `resolve_syn_rest` does. `rest_output` is not changed, so with ihc_style
+  'two_cap' (no synapse) a battery below 1 still shifts the resting output.
+  Pure and differentiable, so safe under `jax.jit`. Ears with other IHC styles
+  are passed through unchanged.
+
+  Args:
+    hypers: The hypers, which give each ear's IHC style.
+    weights: The weights, whose IHC `battery` sets the rest.
+    state: The state, whose two-cap IHC voltages and LPF states are re-solved.
+
+  Returns:
+    The updated state.
+  """
+  ears_state = []
+  for ear_hypers, ear_weights, ear_state in zip(
+      hypers.ears, weights.ears, state.ears
+  ):
+    if ear_hypers.ihc.ihc_style == 2:
+      w = ear_weights.ihc
+      # Steady state of `ihc_step` with `bm_out` at 0.
+      cap1 = w.battery * w.rest_cap1
+      receptor_potential = w.battery - cap1
+      cap2 = w.in2_rate / (w.in2_rate + receptor_potential * w.out2_rate)
+      lpf = receptor_potential * cap2 * w.output_gain
+      # Keep the state's per-channel shapes even if `battery` is a scalar.
+      shape = ear_state.ihc.cap1_voltage.shape
+      cap1, cap2, lpf = (jnp.broadcast_to(x, shape) for x in (cap1, cap2, lpf))
+      ear_state = dataclasses.replace(
+          ear_state,
+          ihc=dataclasses.replace(
+              ear_state.ihc,
+              cap1_voltage=cap1,
+              cap2_voltage=cap2,
+              lpf1_state=lpf,
+              lpf2_state=lpf,
+          ),
+      )
+    ears_state.append(ear_state)
+  return dataclasses.replace(state, ears=ears_state)
 
 
 def design_and_init_ihc(
@@ -1084,6 +1145,8 @@ def design_and_init_ihc(
     )
   else:
     raise NotImplementedError
+  ihc_weights.drive_gain = jnp.ones((n_ch,))
+  ihc_weights.battery = jnp.ones((n_ch,))
   return ihc_hypers, ihc_weights, ihc_state
 
 
@@ -1558,6 +1621,7 @@ def ihc_step(
   """
 
   v_recep = jnp.zeros(ihc_hypers.n_ch)
+  bm_out = ihc_weights.drive_gain * bm_out
   if ihc_hypers.ihc_style == 0:
     ihc_out = jnp.minimum(2, jnp.maximum(0, bm_out))
     #  limit it for stability
@@ -1584,13 +1648,15 @@ def ihc_step(
       # Change to 2-cap version mediated by receptor potential at cap1:
       # Geisler book fig 8.4 suggests 40 to 800 Hz corner.
       receptor_current = conductance * ihc_state.cap1_voltage
-      # "out" means charge depletion; "in" means restoration toward 1.
+      # "out" means charge depletion; "in" means restoration toward the
+      # battery, which is 1 when healthy.
       ihc_state.cap1_voltage = (
           ihc_state.cap1_voltage
           - receptor_current * ihc_weights.out1_rate
-          + (1 - ihc_state.cap1_voltage) * ihc_weights.in1_rate
+          + (ihc_weights.battery - ihc_state.cap1_voltage)
+          * ihc_weights.in1_rate
       )
-      receptor_potential = 1 - ihc_state.cap1_voltage
+      receptor_potential = ihc_weights.battery - ihc_state.cap1_voltage
       ihc_out = receptor_potential * ihc_state.cap2_voltage
       ihc_state.cap2_voltage = (
           ihc_state.cap2_voltage
@@ -1602,7 +1668,9 @@ def ihc_step(
           ihc_out - ihc_state.lpf1_state
       )
       ihc_out = ihc_state.lpf1_state - ihc_weights.rest_output
-      v_recep = ihc_weights.rest_cap1 - ihc_state.cap1_voltage
+      # Depolarisation from the healthy rest, so a battery below 1 rests
+      # below 0.
+      v_recep = receptor_potential - (1 - ihc_weights.rest_cap1)
 
   # for where decimated output is useful
   ihc_state.ihc_accum = ihc_state.ihc_accum + ihc_out
