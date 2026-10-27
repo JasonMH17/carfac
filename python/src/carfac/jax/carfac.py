@@ -464,6 +464,8 @@ class IhcWeights:
   in2_rate: float | jnp.ndarray = 0.0
   output_gain: float | jnp.ndarray = 0.0
   rest_output: float | jnp.ndarray = 0.0
+  # The healthy design's resting cap2 voltage, kept for parity with NumPy;
+  # `resolve_ihc_rest` solves the two-cap rest from the current weights.
   rest_cap2: float | jnp.ndarray = 0.0
   rest_cap1: float | jnp.ndarray = 0.0
 
@@ -994,11 +996,12 @@ def resolve_syn_rest(
 def resolve_ihc_rest(
     hypers: CarfacHypers, weights: CarfacWeights, state: CarfacState
 ) -> CarfacState:
-  """Re-solves each two-cap IHC's resting state for its current `battery`.
+  """Solves each two-cap IHC's resting state for its current `battery`.
 
-  The IHC start state is designed for a battery of 1. After changing
-  `battery`, call this so the two-cap IHC starts at its new rest instead of
-  relaxing to it. The rest is scaled from `rest_cap1`, so this assumes
+  Solves the two-cap IHC start state at rest, where `bm_out` is 0.
+  `design_and_init_carfac` calls this. After changing `battery`, call it again
+  so the IHC starts at its new rest instead of relaxing to it. The rest is
+  scaled from `rest_cap1`, so this assumes
   `rest_cap1` is still the designed rest for `in1_rate` and `out1_rate`, as
   `resolve_syn_rest` does. `rest_output` is not changed, so with ihc_style
   'two_cap' (no synapse) a battery below 1 still shifts the resting output.
@@ -1008,7 +1011,7 @@ def resolve_ihc_rest(
   Args:
     hypers: The hypers, which give each ear's IHC style.
     weights: The weights, whose IHC `battery` sets the rest.
-    state: The state, whose two-cap IHC voltages and LPF states are re-solved.
+    state: The state, whose two-cap IHC voltages and LPF states are solved.
 
   Returns:
     The updated state.
@@ -1142,12 +1145,14 @@ def design_and_init_ihc(
     ihc_weights.rest_cap2 = cap2_voltage
     ihc_weights.rest_cap1 = cap1_voltage
 
+    # Solved by `resolve_ihc_rest`, which `design_and_init_carfac` calls once
+    # all ears are designed.
     ihc_state = IhcState(
         ihc_accum=jnp.zeros((n_ch,)),
-        cap1_voltage=ihc_weights.rest_cap1 * jnp.ones((n_ch,)),
-        cap2_voltage=ihc_weights.rest_cap2 * jnp.ones((n_ch,)),
-        lpf1_state=ihc_weights.rest_output * jnp.ones((n_ch,)),
-        lpf2_state=ihc_weights.rest_output * jnp.ones((n_ch,)),
+        cap1_voltage=jnp.zeros((n_ch,)),
+        cap2_voltage=jnp.zeros((n_ch,)),
+        lpf1_state=jnp.zeros((n_ch,)),
+        lpf2_state=jnp.zeros((n_ch,)),
     )
   else:
     raise NotImplementedError
@@ -1429,6 +1434,7 @@ def design_and_init_carfac(
     )
     state.ears.append(ear_state)
 
+  state = resolve_ihc_rest(hypers, weights, state)
   weights, state = resolve_syn_rest(weights, state)
   return hypers, weights, state
 

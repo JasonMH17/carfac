@@ -829,8 +829,8 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
 
   @parameterized.parameters('two_cap', 'two_cap_with_syn')
   @jax.numpy_dtype_promotion('strict')
-  def test_resolve_ihc_rest_healthy_is_noop(self, ihc_style):
-    """A healthy design is already at rest, so nothing should change."""
+  def test_resolve_ihc_rest_is_idempotent(self, ihc_style):
+    """A designed model is already at rest, so nothing should change."""
     params = carfac_jax.CarfacDesignParameters()
     params.ears[0].ihc.ihc_style = ihc_style
     hypers, weights, state = carfac_jax.design_and_init_carfac(params)
