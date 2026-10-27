@@ -727,8 +727,8 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
     return weights
 
   @jax.numpy_dtype_promotion('strict')
-  def test_resolve_syn_rest_healthy_is_noop(self):
-    """A healthy design is already at rest, so nothing should change."""
+  def test_resolve_syn_rest_is_idempotent(self):
+    """A designed model is already at rest, so nothing should change."""
     _, weights, state = self._design_syn_carfac()
     new_weights, new_state = carfac_jax.resolve_syn_rest(weights, state)
     chex.assert_trees_all_close(new_weights, weights, rtol=1e-5)

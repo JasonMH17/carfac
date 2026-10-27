@@ -422,7 +422,9 @@ class SynWeights:
   a1: float | jnp.ndarray  # Feedback gain
   a2: float | jnp.ndarray  # Output gain
   agc_weights: jnp.ndarray  # For making a nap out to agc in.
-  spont_p: jnp.ndarray  # Used only to init the output LPF
+  # The healthy design's resting firing prob and reservoir, kept for parity
+  # with NumPy; `resolve_syn_rest` solves the rest from the current weights.
+  spont_p: jnp.ndarray
   spont_sub: jnp.ndarray
   res_lpf_inits: jnp.ndarray
   res_coeff: float | jnp.ndarray
@@ -867,8 +869,9 @@ def design_and_init_ihc_syn(
     n_ch: How many channels there are in the filterbank.
 
   Returns:
-    A tuple containing the newly created and initialised synapse coefficients,
-    weights and state.
+    A tuple containing the newly created synapse coefficients, weights and
+    state. The weights' `spont_sub` and the state are left at zero for
+    `resolve_syn_rest` to solve.
   """
   ear_params = params.ears[ear]
   ihc_params = ear_params.ihc
@@ -910,7 +913,6 @@ def design_and_init_ihc_syn(
   spont_p = a2 * w0 * s0  # should match p0; check it; yes it does
   agc_weights = fs * syn_params.agc_weights
   n_fibers = jnp.ones((n_ch, 1)) * syn_params.healthy_n_fibers[None, :]
-  spont_sub = (n_fibers * spont_p) @ jnp.transpose(agc_weights)
   weights = SynWeights(
       n_fibers=n_fibers,
       v_widths=v_widths,
@@ -919,14 +921,16 @@ def design_and_init_ihc_syn(
       a2=a2,
       agc_weights=agc_weights,
       spont_p=spont_p,
-      spont_sub=spont_sub,
+      # Solved with the state by `resolve_syn_rest`, which
+      # `design_and_init_carfac` calls once all ears are designed.
+      spont_sub=jnp.zeros((n_ch,)),
       res_lpf_inits=q0,
       res_coeff=1 - math.exp(-1 / (syn_params.reservoir_tau * fs)),
       lpf_coeff=1 - math.exp(-1 / (syn_params.tau_lpf * fs)),
   )
   state = SynState(
-      reservoirs=jnp.ones((n_ch, 1)) * weights.res_lpf_inits[None, :],
-      lpf_state=jnp.ones((n_ch, 1)) * weights.spont_p[None, :],
+      reservoirs=jnp.zeros_like(n_fibers),
+      lpf_state=jnp.zeros_like(n_fibers),
   )
   return hypers, weights, state
 
@@ -934,17 +938,19 @@ def design_and_init_ihc_syn(
 def resolve_syn_rest(
     weights: CarfacWeights, state: CarfacState
 ) -> Tuple[CarfacWeights, CarfacState]:
-  """Re-solves each synapse's resting output for its current weights.
+  """Solves each synapse's resting output for its current weights.
 
-  `spont_sub` and the synapse start state are designed for the healthy
-  `v_halfs` and `n_fibers`. After changing `v_halfs`, `n_fibers`,
-  `agc_weights` or the IHC `battery`, call this so the synapse output rests at
-  0 in silence again. Pure and differentiable, so safe under `jax.jit`. Ears
+  Solves `spont_sub` and the synapse start state at the resting `v_recep`,
+  which is 0 unless the IHC `battery` is below 1, so the synapse output rests
+  at 0 in silence. `design_and_init_carfac` calls this. After changing
+  `v_halfs`, `n_fibers`, `agc_weights` or the IHC `battery` (e.g. to model
+  synaptopathy or when updating trainable weights inside a training loop),
+  call it again. Pure and differentiable, so safe under `jax.jit`. Ears
   without a synapse are passed through unchanged.
 
   Args:
-    weights: The weights, whose synapse `spont_sub` is re-solved.
-    state: The state, whose synapse `reservoirs` and `lpf_state` are re-solved.
+    weights: The weights, whose synapse `spont_sub` is solved.
+    state: The state, whose synapse `reservoirs` and `lpf_state` are solved.
 
   Returns:
     The updated weights and state.
@@ -1423,6 +1429,7 @@ def design_and_init_carfac(
     )
     state.ears.append(ear_state)
 
+  weights, state = resolve_syn_rest(weights, state)
   return hypers, weights, state
 
 
