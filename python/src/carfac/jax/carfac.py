@@ -478,6 +478,10 @@ class IhcWeights:
   # two-cap IHC, so lowering it reduces the receptor driving force.
   battery: float | jnp.ndarray = 1.0
 
+  # Impairment weight, 1 when healthy. Scales `bm_out` before the detection
+  # nonlinearity, for every IHC style.
+  drive_gain: float | jnp.ndarray = 1.0
+
 
 # States can be donated so we must use default_factory to create a freshly new
 # one every time.
@@ -1124,6 +1128,7 @@ def design_ihc(
   else:
     raise NotImplementedError
   ihc_weights.battery = jnp.ones((n_ch,))
+  ihc_weights.drive_gain = jnp.ones((n_ch,))
   return ihc_hypers, ihc_weights
 
 
@@ -1768,6 +1773,7 @@ def ihc_step(
   """
 
   v_recep = jnp.zeros(ihc_hypers.n_ch)
+  bm_out = ihc_weights.drive_gain * bm_out
   if ihc_hypers.ihc_style == 0:
     ihc_out = jnp.minimum(2, jnp.maximum(0, bm_out))
     #  limit it for stability

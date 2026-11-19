@@ -250,10 +250,10 @@ class CarfacJaxTest(parameterized.TestCase):
       self.container_comparison(
           weights_jax.ears[ear_idx].ihc,
           ear_params_np.ihc_coeffs,
-          exclude_keys={'rest_output', 'battery'},
+          exclude_keys={'rest_output', 'battery', 'drive_gain'},
       )
       # JAX solves the two-cap `rest_output` per channel, so compare by
-      # broadcasting. `battery` is JAX only, and healthy.
+      # broadcasting. `battery` and `drive_gain` are JAX only, and healthy.
       ihc_weights = weights_jax.ears[ear_idx].ihc
       rest_output_np = getattr(ear_params_np.ihc_coeffs, 'rest_output', 0.0)
       self.assertLess(
@@ -262,6 +262,9 @@ class CarfacJaxTest(parameterized.TestCase):
       )
       chex.assert_trees_all_equal(
           ihc_weights.battery, jnp.ones((hypers_jax.ears[ear_idx].n_ch,))
+      )
+      chex.assert_trees_all_equal(
+          ihc_weights.drive_gain, jnp.ones((hypers_jax.ears[ear_idx].n_ch,))
       )
       self.container_comparison(
           hypers_jax.ears[ear_idx].ihc,
@@ -1091,6 +1094,53 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
       return jnp.sum(naps**2)
 
     grad = jax.grad(loss)(0.8 * weights.ears[0].ihc.battery)
+    self.assertTrue(jnp.all(jnp.isfinite(grad)))
+    self.assertGreater(float(jnp.max(jnp.abs(grad))), 0.0)
+
+
+  @parameterized.parameters(
+      'just_hwr', 'one_cap', 'two_cap', 'two_cap_with_syn'
+  )
+  @jax.numpy_dtype_promotion('strict')
+  def test_drive_gain_scales_bm_out(self, ihc_style):
+    """A drive gain should act exactly like scaling bm_out."""
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = ihc_style
+    hypers, weights, state = carfac_jax.design_and_init_carfac(params)
+    n_ch = hypers.ears[0].n_ch
+    drive_gain = jnp.linspace(0.25, 1.0, n_ch)
+    impaired = self._replace_ihc(weights, drive_gain=drive_gain)
+    bm_out = 0.1 * jax.random.normal(jax.random.PRNGKey(0), (n_ch,))
+
+    out = carfac_jax.ihc_step(
+        bm_out,
+        hypers.ears[0].ihc,
+        impaired.ears[0].ihc,
+        copy.deepcopy(state.ears[0].ihc),
+    )
+    expected = carfac_jax.ihc_step(
+        drive_gain * bm_out,
+        hypers.ears[0].ihc,
+        weights.ears[0].ihc,
+        copy.deepcopy(state.ears[0].ihc),
+    )
+    chex.assert_trees_all_close(out, expected)
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_drive_gain_grad(self):
+    """Gradients should flow to drive_gain under jit."""
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = 'two_cap_with_syn'
+    hypers, weights, state = carfac_jax.design_and_init_carfac(params)
+    input_waves = 0.01 * jax.random.normal(jax.random.PRNGKey(0), (100, 1))
+
+    @jax.jit
+    def loss(drive_gain):
+      w = self._replace_ihc(weights, drive_gain=drive_gain)
+      naps, *_ = carfac_jax.run_segment(input_waves, hypers, w, state)
+      return jnp.sum(naps**2)
+
+    grad = jax.grad(loss)(0.8 * weights.ears[0].ihc.drive_gain)
     self.assertTrue(jnp.all(jnp.isfinite(grad)))
     self.assertGreater(float(jnp.max(jnp.abs(grad))), 0.0)
 
