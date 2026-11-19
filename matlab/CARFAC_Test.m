@@ -46,6 +46,7 @@ status = status | test_whole_carfac2_non_decimating(do_plots);
 status = status | test_whole_carfac3_non_decimating(do_plots);
 status = status | test_delay_buffer(do_plots);
 status = status | test_OHC_health(do_plots);
+status = status | test_CAR_init_rest(do_plots);
 status = status | test_multiaural_silent_channel(do_plots);
 status = status | test_multiaural_silent_channel_simpler_decimating(do_plots);
 status = status | test_multiaural_silent_channel_non_decimating(do_plots);
@@ -1060,6 +1061,54 @@ if any(tf_ratio(half_ch+6:end-2) < 0.35)
   fprintf(1, 'tf_ratio too low in later channels in test_OHC_health\n')
 end
 report_status(status, 'test_OHC_health')
+return
+
+
+function status = test_CAR_init_rest(do_plots)
+% Test: After changing OHC_health, CARFAC_Init starts the CAR at rest, so
+% there is no start-up transient.  Compares against the same model started
+% from a state settled on silence, and a CAR state left at the healthy start.
+
+status = 0;
+
+fs = 22050;
+noise = 0.05 * randn(4096, 1);
+CF = CARFAC_Design(1, fs);
+healthy_zr = CF.ears(1).CAR_coeffs.zr_coeffs;
+healthy_g0 = CF.ears(1).CAR_coeffs.g0_coeffs;
+% About 1 s, a multiple of the AGC decimation so the AGC phase matches.
+decimation = prod(CF.ears(1).AGC_coeffs.decimation);
+n_settle = floor(fs / decimation) * decimation;
+
+ohc_healths = {0.5, linspace(0.2, 0.9, CF.n_ch)'};
+for k = 1:numel(ohc_healths)
+  CF = CARFAC_Design(1, fs);
+  CF.ears(1).CAR_coeffs.OHC_health = ...
+    CF.ears(1).CAR_coeffs.OHC_health .* ohc_healths{k};
+  CF = CARFAC_Init(CF);
+  healthy_start = CF;
+  healthy_start.ears(1).CAR_state.zB_memory = healthy_zr;
+  healthy_start.ears(1).CAR_state.g_memory = healthy_g0;
+  [~, settled] = CARFAC_Run_Segment(CF, zeros(n_settle, 1));
+
+  expected = CARFAC_Run_Segment(settled, noise);
+  naps = CARFAC_Run_Segment(CF, noise);
+  max_err = max(abs(naps(:) - expected(:)));
+  naps = CARFAC_Run_Segment(healthy_start, noise);
+  healthy_start_err = max(abs(naps(:) - expected(:)));
+  % Rounding, measured at most 6e-14, with NAP peaks of about 3.7 to 4.5.
+  if max_err > 1e-10
+    status = 1;
+    fprintf(1, 'max_err %g too high in test_CAR_init_rest\n', max_err);
+  end
+  % The healthy start's transient, measured at least 1.08.
+  if healthy_start_err < 0.5
+    status = 1;
+    fprintf(1, 'healthy_start_err %g too low in test_CAR_init_rest\n', ...
+      healthy_start_err);
+  end
+end
+report_status(status, 'test_CAR_init_rest')
 return
 
 

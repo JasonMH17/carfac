@@ -240,8 +240,8 @@ CAR_coeffs.ga_coeffs = 2*(g0 + g1 - 2*ghalf);
 CAR_coeffs.gb_coeffs = 4*ghalf - 3*g0 - g1;
 CAR_coeffs.gc_coeffs = g0;
 
-% Set up initial stage gains.
-% Maybe re-do this at Init time?
+% Set up initial stage gains for the healthy design.  CARFAC_Init starts the
+% CAR state at rest for the current OHC_health instead.
 undamping = CAR_coeffs.OHC_health;  % Typically just ones.
 % Avoid running this model function at Design time; see tests.
 % CAR_coeffs.g0_coeffs = CARFAC_Stage_g(CAR_coeffs, undamping);
