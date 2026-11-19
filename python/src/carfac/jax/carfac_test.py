@@ -871,5 +871,107 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
     chex.assert_trees_all_close(naps, jnp.zeros_like(naps), atol=1e-5)
 
 
+  def _impair_car(self, ohc_health):
+    """Designs a model, sets `ohc_health` and inits it there."""
+    params = carfac_jax.CarfacDesignParameters()
+    hypers, weights = carfac_jax.design_carfac(params)
+    car = weights.ears[0].car
+    car.ohc_health = car.ohc_health * ohc_health
+    weights, state = carfac_jax.init_carfac(hypers, weights)
+    return params, hypers, weights, state
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_car_init_rest_healthy(self):
+    """With `ohc_health` of 1, the CAR starts at the design's rest."""
+    _, hypers, _, state = self._impair_car(1.0)
+    car_hypers = hypers.ears[0].car
+    car_state = state.ears[0].car
+    chex.assert_trees_all_equal(car_state.zb_memory, car_hypers.zr_coeffs)
+    # `stage_g` is the quadratic fit to `design_stage_g`, exact at 1 up to
+    # float32 rounding (measured 1.8e-7).
+    chex.assert_trees_all_close(
+        car_state.g_memory, car_hypers.g0_coeffs, rtol=1e-6, atol=1e-6
+    )
+
+  @parameterized.named_parameters(('scalar', 0.5), ('ramp', None))
+  @jax.numpy_dtype_promotion('strict')
+  def test_car_init_rest(self, ohc_health):
+    """An impaired CAR should start at rest, with no start-up transient.
+
+    Compares against the same model started from a state settled on silence,
+    and against a CAR state left at the healthy start.
+
+    Args:
+      ohc_health: The OHC health, or None for a ramp from 0.2 to 0.9.
+    """
+    params = carfac_jax.CarfacDesignParameters()
+    n_ch = carfac_jax.design_carfac(params)[0].ears[0].n_ch
+    if ohc_health is None:
+      ohc_health = jnp.linspace(0.2, 0.9, n_ch)
+    params, hypers, weights, state = self._impair_car(ohc_health)
+
+    # About 1 s of silence, a multiple of the AGC decimation so the settled
+    # state's `decim_phase` matches the start.
+    decimation = int(hypers.ears[0].agc[0].max_cumulative_decimation)
+    n_settle = int(params.fs) // decimation * decimation
+    _, _, settled, *_ = carfac_jax.run_segment(
+        jnp.zeros((n_settle, 1)), hypers, weights, copy.deepcopy(state)
+    )
+    healthy_start = copy.deepcopy(state)
+    healthy_start.ears[0].car.zb_memory = jnp.copy(
+        hypers.ears[0].car.zr_coeffs
+    )
+    healthy_start.ears[0].car.g_memory = jnp.copy(
+        hypers.ears[0].car.g0_coeffs
+    )
+
+    input_waves = 0.05 * jax.random.normal(jax.random.PRNGKey(0), (4096, 1))
+
+    def naps_from(start):
+      naps, *_ = carfac_jax.run_segment(
+          input_waves, hypers, weights, copy.deepcopy(start)
+      )
+      return naps
+
+    expected = naps_from(settled)
+    # Float32 rounding carried by the AGC loop, measured at most 4.1e-5 for a
+    # tone or noise, with NAP peaks of about 3.5 to 5. In float64 it is 1e-13.
+    chex.assert_trees_all_close(naps_from(state), expected, atol=2e-4)
+    # The healthy start's transient, measured at least 1.1.
+    self.assertGreater(
+        float(jnp.max(jnp.abs(naps_from(healthy_start) - expected))), 0.5
+    )
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_car_init_rest_grad(self):
+    """The gradient for `ohc_health` through init should match a difference."""
+    params = carfac_jax.CarfacDesignParameters()
+    hypers, weights = carfac_jax.design_carfac(params)
+    n_ch = hypers.ears[0].n_ch
+    input_waves = 0.05 * jax.random.normal(jax.random.PRNGKey(0), (512, 1))
+    ohc_health = jnp.linspace(0.2, 0.9, n_ch)
+
+    @jax.jit
+    def loss(ohc_health):
+      w = copy.deepcopy(weights)
+      w.ears[0].car.ohc_health = ohc_health
+      w, s = carfac_jax.init_carfac(hypers, w)
+      naps, *_ = carfac_jax.run_segment(input_waves, hypers, w, s)
+      return jnp.mean(naps**2)
+
+    grad = jax.grad(loss)(ohc_health)
+    self.assertTrue(jnp.all(jnp.isfinite(grad)))
+    # Central difference along `ohc_health` itself, measured to agree to 1e-5
+    # in float32 and 2e-6 in float64.
+    eps = 3e-3
+    difference = (
+        loss(ohc_health * (1 + eps)) - loss(ohc_health * (1 - eps))
+    ) / (2 * eps)
+    self.assertAlmostEqual(
+        float(jnp.dot(grad, ohc_health)),
+        float(difference),
+        delta=1e-3 * abs(float(difference)),
+    )
+
 if __name__ == '__main__':
   absltest.main()
