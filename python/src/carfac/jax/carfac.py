@@ -465,14 +465,18 @@ class IhcWeights:
   output_gain: float | jnp.ndarray = 0.0
   # Two-cap rest value, re-solved by `resolve_ihc_rest`.
   rest_output: float | jnp.ndarray = 0.0
-  # Two-cap healthy design rest. `rest_cap1` is also the reference for
-  # `v_recep`.
+  # Two-cap healthy design rest, with a `battery` of 1. `rest_cap1` is also
+  # the reference for `v_recep`.
   rest_cap2: float | jnp.ndarray = 0.0
   rest_cap1: float | jnp.ndarray = 0.0
 
   rest_cap: float | jnp.ndarray = 0.0
   out_rate: float | jnp.ndarray = 0.0
   in_rate: float = 0.0
+
+  # Impairment weight, 1 when healthy. The voltage cap1 recharges toward in the
+  # two-cap IHC, so lowering it reduces the receptor driving force.
+  battery: float | jnp.ndarray = 1.0
 
 
 # States can be donated so we must use default_factory to create a freshly new
@@ -1119,6 +1123,7 @@ def design_ihc(
     ihc_weights.rest_output = ihc_weights.rest_output * jnp.ones((n_ch,))
   else:
     raise NotImplementedError
+  ihc_weights.battery = jnp.ones((n_ch,))
   return ihc_hypers, ihc_weights
 
 
@@ -1160,7 +1165,7 @@ def _ihc_two_cap_rest(
   """The two-cap IHC rest for its current weights.
 
   The steady state of `ihc_step` with `bm_out` at 0, where the receptor
-  conductance is `ihc_detect(0)`.
+  conductance is `ihc_detect(0)` and cap1 recharges toward `battery`.
 
   Args:
     ihc_weights: The two-cap IHC weights.
@@ -1168,17 +1173,19 @@ def _ihc_two_cap_rest(
   Returns:
     The resting cap1 and cap2 voltages, `rest_output` and `v_recep`.
   """
-  # cap1 recharges at in1_rate and discharges through the receptor conductance
-  # at out1_rate. The receptor potential, 1 - cap1, is solved without the
-  # subtraction, which loses precision as cap1 is near 1.
+  # cap1 recharges toward `battery` at in1_rate and discharges through the
+  # receptor conductance at out1_rate. The receptor potential, battery - cap1,
+  # is solved without the subtraction, which loses precision as cap1 is near
+  # the battery.
   discharge = ihc_detect(0) * ihc_weights.out1_rate
-  cap1 = ihc_weights.in1_rate / (ihc_weights.in1_rate + discharge)
-  receptor_potential = discharge / (ihc_weights.in1_rate + discharge)
+  fraction = ihc_weights.battery / (ihc_weights.in1_rate + discharge)
+  cap1 = fraction * ihc_weights.in1_rate
+  receptor_potential = fraction * discharge
   cap2 = ihc_weights.in2_rate / (
       ihc_weights.in2_rate + receptor_potential * ihc_weights.out2_rate
   )
   rest_output = receptor_potential * cap2 * ihc_weights.output_gain
-  v_recep = ihc_weights.rest_cap1 - cap1
+  v_recep = receptor_potential - (1 - ihc_weights.rest_cap1)
   return cap1, cap2, rest_output, v_recep
 
 
@@ -1189,11 +1196,11 @@ def resolve_ihc_rest(
 
   Solves `rest_output` and the two-cap IHC start state at the rest point, where
   `bm_out` is 0, so `ihc_out` is 0 in silence. `init_carfac` calls this. After
-  changing the IHC weights (e.g. `out1_rate` or `output_gain` when updating
-  trainable weights inside a training loop), call it again, and also
-  `resolve_syn_rest`, whose rest depends on the IHC's. Pure and differentiable,
-  so safe under `jax.jit`. Ears with other IHC styles are passed through
-  unchanged.
+  changing the IHC weights (e.g. `battery`, or `out1_rate` or `output_gain`
+  when updating trainable weights inside a training loop), call it again, and
+  also `resolve_syn_rest`, whose rest depends on the IHC's. Pure and
+  differentiable, so safe under `jax.jit`. Ears with other IHC styles are
+  passed through unchanged.
 
   Args:
     hypers: The hypers, which give each ear's IHC style.
@@ -1521,9 +1528,9 @@ def init_carfac(
 
   The two-cap IHC and synapse rest values are solved from the current weights
   by `resolve_ihc_rest` and `resolve_syn_rest`, so after changing weights (e.g.
-  `v_halfs` or `n_fibers` to model synaptopathy) call this again and the state
-  starts at the new rest values. NumPy's `carfac_init` solves the synapse rest
-  the same way. Pure, so it can be JITed with `hypers` static.
+  `battery`, or `v_halfs` or `n_fibers` to model synaptopathy) call this again
+  and the state starts at the new rest values. NumPy's `carfac_init` solves the
+  synapse rest the same way. Pure, so it can be JITed with `hypers` static.
 
   Args:
     hypers: The hypers, from `design_carfac`.
@@ -1787,13 +1794,15 @@ def ihc_step(
       # Change to 2-cap version mediated by receptor potential at cap1:
       # Geisler book fig 8.4 suggests 40 to 800 Hz corner.
       receptor_current = conductance * ihc_state.cap1_voltage
-      # "out" means charge depletion; "in" means restoration toward 1.
+      # "out" means charge depletion; "in" means restoration toward the
+      # battery, which is 1 when healthy.
       ihc_state.cap1_voltage = (
           ihc_state.cap1_voltage
           - receptor_current * ihc_weights.out1_rate
-          + (1 - ihc_state.cap1_voltage) * ihc_weights.in1_rate
+          + (ihc_weights.battery - ihc_state.cap1_voltage)
+          * ihc_weights.in1_rate
       )
-      receptor_potential = 1 - ihc_state.cap1_voltage
+      receptor_potential = ihc_weights.battery - ihc_state.cap1_voltage
       ihc_out = receptor_potential * ihc_state.cap2_voltage
       ihc_state.cap2_voltage = (
           ihc_state.cap2_voltage
@@ -1805,7 +1814,9 @@ def ihc_step(
           ihc_out - ihc_state.lpf1_state
       )
       ihc_out = ihc_state.lpf1_state - ihc_weights.rest_output
-      v_recep = ihc_weights.rest_cap1 - ihc_state.cap1_voltage
+      # Measured from the healthy rest, so a battery below 1 gives a v_recep
+      # below 0 at rest.
+      v_recep = receptor_potential - (1 - ihc_weights.rest_cap1)
 
   # for where decimated output is useful
   ihc_state.ihc_accum = ihc_state.ihc_accum + ihc_out
