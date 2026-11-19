@@ -218,8 +218,8 @@ def design_filters(
   car_coeffs.gb_coeffs = 4 * ghalf - 3 * g0 - g1
   car_coeffs.gc_coeffs = g0
 
-  # Set up initial stage gains.
-  # Maybe re-do this at Init time?
+  # Set up initial stage gains for the healthy design. `car_init_state` starts
+  # the CAR state at rest for the current `ohc_health` instead.
   undamping = car_coeffs.ohc_health
   # Avoid running this model function at Design time; see tests.
   car_coeffs.g0_coeffs = design_stage_g(car_coeffs, undamping)  # pyrefly: ignore[bad-argument-type]
@@ -278,10 +278,10 @@ class CarState:
   z1_memory: np.ndarray
   z2_memory: np.ndarray
   za_memory: np.ndarray
-  zb_memory: np.ndarray  # , coeffs.zr_coeffs, ...
+  zb_memory: np.ndarray  # coeffs.zr_coeffs * coeffs.ohc_health, ...
   dzb_memory: np.ndarray  # (n_ch, 1), ...
   zy_memory: np.ndarray  # zeros(n_ch, 1), ...
-  g_memory: np.ndarray  # coeffs.g0_coeffs, ...
+  g_memory: np.ndarray  # stage_g(coeffs, coeffs.ohc_health), ...
   dg_memory: np.ndarray  #  zeros(n_ch, 1) ...
   ac_coupler: np.ndarray
 
@@ -290,15 +290,33 @@ class CarState:
     self.z1_memory = np.zeros((n_ch,), dtype=dtype)
     self.z2_memory = np.zeros((n_ch,), dtype=dtype)
     self.za_memory = np.zeros((n_ch,), dtype=dtype)
-    self.zb_memory = coeffs.zr_coeffs
+    # At rest for the current `ohc_health`, where `close_agc_loop` holds them.
+    undamping = coeffs.ohc_health
+    self.zb_memory = coeffs.zr_coeffs * undamping
     self.dzb_memory = np.zeros((n_ch,), dtype=dtype)
     self.zy_memory = np.zeros((n_ch,), dtype=dtype)
-    self.g_memory = coeffs.g0_coeffs
+    self.g_memory = stage_g(coeffs, undamping)  # pyrefly: ignore[bad-argument-type]
     self.dg_memory = np.zeros((n_ch,), dtype=dtype)
     self.ac_coupler = np.zeros((n_ch,), dtype=dtype)
 
 
 def car_init_state(coeffs: CarCoeffs) -> CarState:
+  """Inits the CAR state at rest for the current `ohc_health`.
+
+  At rest the AGC memory is 0, so `close_agc_loop` holds the undamping at
+  `ohc_health`, with `zb_memory` at `zr_coeffs * ohc_health` and `g_memory` at
+  `stage_g` of it. Starting there, rather than at the healthy design's
+  undamping of 1, avoids a start-up transient when `ohc_health` was changed
+  after design. `stage_g` is the quadratic approximation that `close_agc_loop`
+  uses, so this is its rest for any `ohc_health`; with `ohc_health` of 1 it
+  matches the design's `g0_coeffs` to rounding.
+
+  Args:
+    coeffs: The CAR coeffs, possibly changed since design.
+
+  Returns:
+    The newly initialised CAR state.
+  """
   return CarState(coeffs)
 
 

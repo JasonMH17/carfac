@@ -1,3 +1,4 @@
+import copy
 import math
 from typing import List, Tuple
 
@@ -927,6 +928,41 @@ class CarfacTest(parameterized.TestCase):
 
     naps, _, _, _, _ = carfac.run_segment(cfp, np.zeros(int(0.1 * fs)))
     self.assertLess(np.max(np.abs(naps)), 1e-6)
+
+  def test_car_init_rest(self):
+    # Test: After changing OHC health, carfac_init starts the CAR at rest, so
+    # there is no start-up transient. Compares against the same model started
+    # from a state settled on silence, and a CAR state left at the healthy
+    # start.
+    fs = 22050.0
+    np.random.seed(seed=1)
+    noise = 0.05 * np.random.randn(4096)
+    cfp = carfac.design_carfac(fs=fs)
+    coeffs = cfp.ears[0].car_coeffs
+    healthy_zr = coeffs.zr_coeffs.copy()
+    healthy_g0 = coeffs.g0_coeffs.copy()
+    # About 1 s, a multiple of the AGC decimation so the AGC phase matches.
+    decimation = int(np.prod([c.decimation for c in cfp.ears[0].agc_coeffs]))
+    n_settle = int(fs) // decimation * decimation
+
+    for ohc_health in (0.5, np.linspace(0.2, 0.9, cfp.n_ch)):
+      cfp = carfac.design_carfac(fs=fs)
+      cfp.ears[0].car_coeffs.ohc_health *= ohc_health
+      cfp = carfac.carfac_init(cfp)
+      healthy_start = copy.deepcopy(cfp)
+      healthy_start.ears[0].car_state.zb_memory = healthy_zr
+      healthy_start.ears[0].car_state.g_memory = healthy_g0
+      _, settled, _, _, _ = carfac.run_segment(
+          copy.deepcopy(cfp), np.zeros(n_settle)
+      )
+
+      expected, _, _, _, _ = carfac.run_segment(settled, noise)
+      naps, _, _, _, _ = carfac.run_segment(cfp, noise)
+      # Rounding, measured at most 1.5e-7, with NAP peaks of about 3.6.
+      self.assertLess(np.max(np.abs(naps - expected)), 1e-5)
+      # The healthy start's transient, measured at least 2.1.
+      naps, _, _, _, _ = carfac.run_segment(healthy_start, noise)
+      self.assertGreater(np.max(np.abs(naps - expected)), 0.5)
 
   def test_multiaural_carfac(self):
     """Test multiaural functionality with 2 ears.
