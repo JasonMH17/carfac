@@ -248,7 +248,17 @@ class CarfacJaxTest(parameterized.TestCase):
           weights_jax.ears[ear_idx].car, ear_params_np.car_coeffs
       )
       self.container_comparison(
-          weights_jax.ears[ear_idx].ihc, ear_params_np.ihc_coeffs
+          weights_jax.ears[ear_idx].ihc,
+          ear_params_np.ihc_coeffs,
+          exclude_keys={'rest_output'},
+      )
+      # JAX solves the two-cap `rest_output` per channel, so compare by
+      # broadcasting.
+      ihc_weights = weights_jax.ears[ear_idx].ihc
+      rest_output_np = getattr(ear_params_np.ihc_coeffs, 'rest_output', 0.0)
+      self.assertLess(
+          jnp.max(jnp.abs(ihc_weights.rest_output - rest_output_np)),
+          self.default_delta,
       )
       self.container_comparison(
           hypers_jax.ears[ear_idx].ihc,
@@ -874,6 +884,98 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
     )
     chex.assert_trees_all_close(naps, jnp.zeros_like(naps), atol=1e-5)
 
+  def _replace_ihc(self, weights, **kwargs):
+    """Returns weights with ear 0's IHC weights replaced by `kwargs`."""
+    ear_weights = dataclasses.replace(
+        weights.ears[0], ihc=dataclasses.replace(weights.ears[0].ihc, **kwargs)
+    )
+    return dataclasses.replace(weights, ears=[ear_weights])
+
+  @parameterized.parameters('two_cap', 'two_cap_with_syn')
+  @jax.numpy_dtype_promotion('strict')
+  def test_resolve_ihc_rest_is_idempotent(self, ihc_style):
+    """A designed model is already at rest, so nothing should change."""
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = ihc_style
+    hypers, weights, state = carfac_jax.design_and_init_carfac(params)
+    new_weights, new_state = carfac_jax.resolve_ihc_rest(hypers, weights, state)
+    chex.assert_trees_all_close(new_weights, weights, rtol=1e-5)
+    chex.assert_trees_all_close(new_state, state, rtol=1e-5)
+
+  def _change_ihc(self, weights, n_ch):
+    """Changes the two-cap IHC rates and gain, moving it off its rest."""
+    ihc = weights.ears[0].ihc
+    return self._replace_ihc(
+        weights,
+        out1_rate=ihc.out1_rate * jnp.linspace(0.5, 2.0, n_ch),
+        output_gain=ihc.output_gain * 1.5,
+    )
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_resolve_ihc_rest_is_fixed_point_at_rest(self):
+    """A changed IHC should hold its solved rest with 0 output."""
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = 'two_cap'
+    hypers, weights = carfac_jax.design_carfac(params)
+    n_ch = hypers.ears[0].n_ch
+    weights = self._change_ihc(weights, n_ch)
+    weights, state = carfac_jax.init_carfac(hypers, weights)
+
+    ihc_state = copy.deepcopy(state.ears[0].ihc)
+    for _ in range(100):
+      ihc_out, v_recep, ihc_state = carfac_jax.ihc_step(
+          jnp.zeros(n_ch), hypers.ears[0].ihc, weights.ears[0].ihc, ihc_state
+      )
+    chex.assert_trees_all_close(ihc_out, jnp.zeros_like(ihc_out), atol=1e-5)
+    # `v_recep` is measured from the healthy design rest, so it moves too.
+    chex.assert_trees_all_close(
+        v_recep,
+        weights.ears[0].ihc.rest_cap1 - state.ears[0].ihc.cap1_voltage,
+        atol=1e-6,
+    )
+    self.assertGreater(float(jnp.max(jnp.abs(v_recep))), 1e-3)
+    ihc_state.ihc_accum = state.ears[0].ihc.ihc_accum
+    chex.assert_trees_all_close(
+        ihc_state, state.ears[0].ihc, rtol=1e-5, atol=1e-6
+    )
+
+  @parameterized.parameters('two_cap', 'two_cap_with_syn')
+  @jax.numpy_dtype_promotion('strict')
+  def test_ihc_rest(self, ihc_style):
+    """After changing the IHC, `init_carfac` solves the IHC and synapse rest.
+
+    Like `test_syn_rest`: the NAP is 0 in quiet.
+    """
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = ihc_style
+    hypers, weights = carfac_jax.design_carfac(params)
+    weights = self._change_ihc(weights, hypers.ears[0].n_ch)
+    weights, state = carfac_jax.init_carfac(hypers, weights)
+
+    naps, *_ = carfac_jax.run_segment(
+        jnp.zeros((int(0.1 * params.fs), 1)), hypers, weights, state
+    )
+    chex.assert_trees_all_close(naps, jnp.zeros_like(naps), atol=1e-5)
+
+  @jax.numpy_dtype_promotion('strict')
+  def test_ihc_rest_grad(self):
+    """Gradients should flow to out1_rate through `init_carfac` under jit."""
+    params = carfac_jax.CarfacDesignParameters()
+    params.ears[0].ihc.ihc_style = 'two_cap_with_syn'
+    hypers, weights = carfac_jax.design_carfac(params)
+    input_waves = 0.01 * jax.random.normal(jax.random.PRNGKey(0), (100, 1))
+
+    @jax.jit
+    def loss(out1_rate):
+      w = self._replace_ihc(weights, out1_rate=out1_rate)
+      w, s = carfac_jax.init_carfac(hypers, w)
+      naps, *_ = carfac_jax.run_segment(input_waves, hypers, w, s)
+      return jnp.sum(naps**2)
+
+    n_ch = hypers.ears[0].n_ch
+    grad = jax.grad(loss)(weights.ears[0].ihc.out1_rate * jnp.ones((n_ch,)))
+    self.assertTrue(jnp.all(jnp.isfinite(grad)))
+    self.assertGreater(float(jnp.max(jnp.abs(grad))), 0.0)
 
 if __name__ == '__main__':
   absltest.main()
