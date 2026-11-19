@@ -463,7 +463,10 @@ class IhcWeights:
   out2_rate: float | jnp.ndarray = 0.0
   in2_rate: float | jnp.ndarray = 0.0
   output_gain: float | jnp.ndarray = 0.0
+  # Two-cap rest value, re-solved by `resolve_ihc_rest`.
   rest_output: float | jnp.ndarray = 0.0
+  # Two-cap healthy design rest. `rest_cap1` is also the reference for
+  # `v_recep`.
   rest_cap2: float | jnp.ndarray = 0.0
   rest_cap1: float | jnp.ndarray = 0.0
 
@@ -959,12 +962,14 @@ def resolve_syn_rest(
   """Solves each synapse's resting output for its current weights.
 
   Solves `spont_p`, `res_lpf_inits`, `spont_sub` and the synapse start state
-  at the rest point, where `v_recep` is 0, so `syn_out` is 0 in silence, as
-  NumPy's `carfac_init` and MATLAB's `CARFAC_Init` do.
-  `init_carfac` calls this. After changing `v_halfs`, `n_fibers` or
-  `agc_weights` (e.g. to model synaptopathy or when updating trainable synapse
-  weights inside a training loop), call it again. Pure and differentiable, so
-  safe under `jax.jit`. Ears without a synapse are passed through unchanged.
+  at the rest point, where `v_recep` is the two-cap IHC's resting value, which
+  is 0 for the healthy design, so `syn_out` is 0 in silence, as NumPy's
+  `carfac_init` and MATLAB's `CARFAC_Init` do.
+  `init_carfac` calls this. After changing `v_halfs`, `n_fibers`,
+  `agc_weights` or the IHC weights (e.g. to model synaptopathy or when
+  updating trainable weights inside a training loop), call it again. Pure and
+  differentiable, so safe under `jax.jit`. Ears without a synapse are passed
+  through unchanged.
 
   Args:
     weights: The weights, whose synapse `spont_p`, `res_lpf_inits` and
@@ -979,13 +984,16 @@ def resolve_syn_rest(
   for ear_weights, ear_state in zip(weights.ears, state.ears):
     syn_weights = ear_weights.syn
     if syn_weights is not None:
-      # Steady state of `syn_step` with `v_recep` at 0: q = a1 * r and
+      # The synapse is only designed with the two-cap IHC.
+      *_, v_rest = _ihc_two_cap_rest(ear_weights.ihc)
+      v_rest = jnp.reshape(v_rest, (-1, 1))  # Per channel, or one for all.
+      # Steady state of `syn_step` with `v_recep` at v_rest: q = a1 * r and
       # p = a2 * r, where r = (1 - q) * s = s / (1 + a1 * s)
-      # = 1 / (1 + a1 + exp(v_halfs / v_widths)).
+      # = 1 / (1 + a1 + exp((v_halfs - v_rest) / v_widths)).
       r = 1 / (
           1
           + syn_weights.a1
-          + jnp.exp(syn_weights.v_halfs / syn_weights.v_widths)
+          + jnp.exp((syn_weights.v_halfs - v_rest) / syn_weights.v_widths)
       )
       r = jnp.broadcast_to(r, syn_weights.n_fibers.shape)
       q = syn_weights.a1 * r
@@ -1107,6 +1115,8 @@ def design_ihc(
     )
     ihc_weights.rest_cap2 = cap2_voltage
     ihc_weights.rest_cap1 = cap1_voltage
+    # Per channel, the shape `resolve_ihc_rest` solves it in.
+    ihc_weights.rest_output = ihc_weights.rest_output * jnp.ones((n_ch,))
   else:
     raise NotImplementedError
   return ihc_hypers, ihc_weights
@@ -1142,6 +1152,90 @@ def init_ihc_state(ihc_hypers: IhcHypers, ihc_weights: IhcWeights) -> IhcState:
     )
   else:
     raise NotImplementedError
+
+
+def _ihc_two_cap_rest(
+    ihc_weights: IhcWeights,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+  """The two-cap IHC rest for its current weights.
+
+  The steady state of `ihc_step` with `bm_out` at 0, where the receptor
+  conductance is `ihc_detect(0)`.
+
+  Args:
+    ihc_weights: The two-cap IHC weights.
+
+  Returns:
+    The resting cap1 and cap2 voltages, `rest_output` and `v_recep`.
+  """
+  # cap1 recharges at in1_rate and discharges through the receptor conductance
+  # at out1_rate. The receptor potential, 1 - cap1, is solved without the
+  # subtraction, which loses precision as cap1 is near 1.
+  discharge = ihc_detect(0) * ihc_weights.out1_rate
+  cap1 = ihc_weights.in1_rate / (ihc_weights.in1_rate + discharge)
+  receptor_potential = discharge / (ihc_weights.in1_rate + discharge)
+  cap2 = ihc_weights.in2_rate / (
+      ihc_weights.in2_rate + receptor_potential * ihc_weights.out2_rate
+  )
+  rest_output = receptor_potential * cap2 * ihc_weights.output_gain
+  v_recep = ihc_weights.rest_cap1 - cap1
+  return cap1, cap2, rest_output, v_recep
+
+
+def resolve_ihc_rest(
+    hypers: CarfacHypers, weights: CarfacWeights, state: CarfacState
+) -> Tuple[CarfacWeights, CarfacState]:
+  """Solves each two-cap IHC's rest for its current weights.
+
+  Solves `rest_output` and the two-cap IHC start state at the rest point, where
+  `bm_out` is 0, so `ihc_out` is 0 in silence. `init_carfac` calls this. After
+  changing the IHC weights (e.g. `out1_rate` or `output_gain` when updating
+  trainable weights inside a training loop), call it again, and also
+  `resolve_syn_rest`, whose rest depends on the IHC's. Pure and differentiable,
+  so safe under `jax.jit`. Ears with other IHC styles are passed through
+  unchanged.
+
+  Args:
+    hypers: The hypers, which give each ear's IHC style.
+    weights: The weights, whose IHC `rest_output` is solved.
+    state: The state, whose two-cap IHC voltages and LPF states are solved.
+
+  Returns:
+    The updated weights and state.
+  """
+  ears_weights = []
+  ears_state = []
+  for ear_hypers, ear_weights, ear_state in zip(
+      hypers.ears, weights.ears, state.ears
+  ):
+    if ear_hypers.ihc.ihc_style == 2:
+      cap1, cap2, rest_output, _ = _ihc_two_cap_rest(ear_weights.ihc)
+      # Per channel, as designed, even if the weights are scalars.
+      shape = (ear_hypers.ihc.n_ch,)
+      cap1, cap2, rest_output = (
+          jnp.broadcast_to(x, shape) for x in (cap1, cap2, rest_output)
+      )
+      ear_weights = dataclasses.replace(
+          ear_weights,
+          ihc=dataclasses.replace(ear_weights.ihc, rest_output=rest_output),
+      )
+      # "States" will be donated.
+      ear_state = dataclasses.replace(
+          ear_state,
+          ihc=dataclasses.replace(
+              ear_state.ihc,
+              cap1_voltage=jnp.copy(cap1),
+              cap2_voltage=jnp.copy(cap2),
+              lpf1_state=jnp.copy(rest_output),
+              lpf2_state=jnp.copy(rest_output),
+          ),
+      )
+    ears_weights.append(ear_weights)
+    ears_state.append(ear_state)
+  return (
+      dataclasses.replace(weights, ears=ears_weights),
+      dataclasses.replace(state, ears=ears_state),
+  )
 
 
 def design_fir_coeffs(n_taps, delay_variance, mean_delay, n_iter):
@@ -1425,18 +1519,19 @@ def init_carfac(
 ) -> Tuple[CarfacWeights, CarfacState]:
   """Init the CARFAC model's state for its current weights.
 
-  Mirrors NumPy's `carfac_init`: the synapse's rest is solved from the current
-  weights by `resolve_syn_rest`, so after changing weights (e.g. `v_halfs` or
-  `n_fibers` to model synaptopathy) call this again and the model starts at its
-  new rest. Pure, so it can be JITed with `hypers` static.
+  The two-cap IHC and synapse rest values are solved from the current weights
+  by `resolve_ihc_rest` and `resolve_syn_rest`, so after changing weights (e.g.
+  `v_halfs` or `n_fibers` to model synaptopathy) call this again and the state
+  starts at the new rest values. NumPy's `carfac_init` solves the synapse rest
+  the same way. Pure, so it can be JITed with `hypers` static.
 
   Args:
     hypers: The hypers, from `design_carfac`.
     weights: The weights, from `design_carfac` and possibly changed since.
 
   Returns:
-    The weights, with the synapse rest solved, and the newly initialised state
-    of CARFAC model.
+    The weights, with the IHC and synapse rest solved, and the newly
+    initialised state of CARFAC model.
   """
   state = CarfacState()
   for ear_hypers, ear_weights in zip(hypers.ears, weights.ears):
@@ -1448,6 +1543,7 @@ def init_carfac(
         syn=syn_state,  # pyrefly: ignore[bad-argument-type]
     )
     state.ears.append(ear_state)
+  weights, state = resolve_ihc_rest(hypers, weights, state)
   return resolve_syn_rest(weights, state)
 
 
