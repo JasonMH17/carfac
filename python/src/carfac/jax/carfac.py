@@ -783,8 +783,8 @@ def design_filters(
   car_weights.ga_coeffs = 2 * (g0 + g1 - 2 * ghalf)
   car_weights.gb_coeffs = 4 * ghalf - 3 * g0 - g1
   car_weights.gc_coeffs = g0
-  # Set up initial stage gains.
-  # Maybe re-do this at Init time?
+  # Set up initial stage gains for the healthy design. `init_car_state` starts
+  # the CAR state at rest for the current `ohc_health` instead.
   undamping = car_weights.ohc_health
   # Avoid running this model function at Design time; see tests.
   car_hypers.g0_coeffs = design_stage_g(car_hypers, undamping)  # pyrefly: ignore[bad-argument-type]
@@ -792,24 +792,35 @@ def design_filters(
   return car_hypers, car_weights
 
 
-def init_car_state(car_hypers: CarHypers) -> CarState:
-  """Init the CAR filters' state.
+def init_car_state(car_hypers: CarHypers, car_weights: CarWeights) -> CarState:
+  """Init the CAR filters' state at rest for the current `ohc_health`.
+
+  At rest the AGC memory is 0, so `close_agc_loop` holds the undamping at
+  `ohc_health`, with `zb_memory` at `zr_coeffs * ohc_health` and `g_memory` at
+  `stage_g` of it. Starting there, rather than at the healthy design's
+  undamping of 1, avoids a start-up transient when `ohc_health` was changed
+  after design. `stage_g` is the quadratic approximation that `close_agc_loop`
+  uses, so this is its rest for any `ohc_health`; with `ohc_health` of 1 it
+  matches the design's `g0_coeffs` to rounding.
 
   Args:
     car_hypers: The CAR hyperparameters, from `design_filters`.
+    car_weights: The CAR weights, from `design_filters` and possibly changed
+      since.
 
   Returns:
     The newly initialised CAR state.
   """
   n_ch = car_hypers.n_ch
+  undamping = car_weights.ohc_health
   return CarState(
       z1_memory=jnp.zeros((n_ch,)),
       z2_memory=jnp.zeros((n_ch,)),
       za_memory=jnp.zeros((n_ch,)),
-      zb_memory=jnp.copy(car_hypers.zr_coeffs),  # "States" will be donated.
+      zb_memory=car_hypers.zr_coeffs * undamping,
       dzb_memory=jnp.zeros((n_ch,)),
       zy_memory=jnp.zeros((n_ch,)),
-      g_memory=jnp.copy(car_hypers.g0_coeffs),  # "States" will be donated.
+      g_memory=stage_g(car_weights, undamping),
       dg_memory=jnp.zeros((n_ch,)),
       ac_coupler=jnp.zeros((n_ch,)),
   )
@@ -1549,7 +1560,7 @@ def init_carfac(
   for ear_hypers, ear_weights in zip(hypers.ears, weights.ears):
     syn_state = init_syn_state(ear_weights.syn)
     ear_state = EarState(
-        car=init_car_state(ear_hypers.car),
+        car=init_car_state(ear_hypers.car, ear_weights.car),
         agc=init_agc_state(ear_hypers.agc),
         ihc=init_ihc_state(ear_hypers.ihc, ear_weights.ihc),
         syn=syn_state,  # pyrefly: ignore[bad-argument-type]
