@@ -11,9 +11,13 @@ import numpy as np
 from carfac.np import carfac
 
 # Note some of these tests create plots for easier comparison to the results
-# in Dick Lyon's Human and Machine Hearing. All stimuli are presented at the
-# native CARFAC v1/v2 input scaling of 107 dB SPL for RMS = 1. The plots are
-# stored in /tmp, and
+# in Dick Lyon's Human and Machine Hearing. Stimuli are in pascals, for the
+# default input_scale_dbspl of 94, at the same dB SPL as under the earlier
+# input scale of 107 dB SPL for RMS 1, so the golden data is unchanged. Noise
+# is set by its RMS level, and tones and impulses by their peak level, both as
+# whole numbers of dB SPL. A tone's RMS level is 3.01 dB below its peak, and
+# rounding it to a whole number changes results such as test_whole_carfac's
+# AGC adaptation beyond its tolerance. The plots are stored in /tmp, and
 # the easiest way to see them is to run the test on your machine; or in a
 # Colab such as google3/third_party/carfac/python/np/CARFAC_Testing.ipynb
 
@@ -169,7 +173,7 @@ class CarfacTest(parameterized.TestCase):
     carfac.design_fir_coeffs(5, 1, 1, 1)
 
   def test_car_freq_response(self):
-    cfp = carfac.design_carfac(input_scale_dbspl=107.0)
+    cfp = carfac.design_carfac()
     carfac.carfac_init(cfp)
 
     # Show impulse response for just the CAR Filter bank.
@@ -500,7 +504,7 @@ class CarfacTest(parameterized.TestCase):
   def test_agc_steady_state(self):
     # Test: Steady state response
     # Analagous to figure 19.7
-    cfp = carfac.design_carfac(input_scale_dbspl=107.0)
+    cfp = carfac.design_carfac()
     cf = carfac.carfac_init(cfp)
 
     test_channel = 40
@@ -561,7 +565,7 @@ class CarfacTest(parameterized.TestCase):
 
   def test_stage_g_calculation(self):
     fs = 22050.0
-    cfp = carfac.design_carfac(fs=fs, input_scale_dbspl=107.0)
+    cfp = carfac.design_carfac(fs=fs)
     # Set to true to save a large number of figures.
     do_plots = False
     # arange goes to just above 1 to ensure 1.0 is tested.
@@ -591,20 +595,20 @@ class CarfacTest(parameterized.TestCase):
   )
   def test_whole_carfac(self, ihc_style):
     # Test: Make sure that the AGC adapts to a tone. Test with open-loop impulse
-    # response.
+    # response. The adaptation is sensitive to the tone level, so the tone is
+    # set by its exact peak level (87 dB SPL, i.e. 83.99 dB SPL RMS).
 
     fs = 22050.0
     fp = 1000.0  # Probe tone
     t = np.arange(0, 2, 1 / fs)  # 2s of tone
-    sinusoid = 1e-1 * np.sin(2 * np.pi * t * fp)
+    amplitude = 10 ** ((87 - 94) / 20)  # Peak of 87 dB SPL, in pascals.
+    sinusoid = amplitude * np.sin(2 * np.pi * t * fp)
 
     t = np.arange(0, 0.5, 1 / fs)
     impulse = np.zeros(t.shape)
-    impulse[0] = 1e-4
+    impulse[0] = 10 ** ((27 - 94) / 20)  # Small, 27 dB SPL peak.
 
-    cfp = carfac.design_carfac(
-        fs=fs, input_scale_dbspl=107.0, ihc_style=ihc_style
-    )
+    cfp = carfac.design_carfac(fs=fs, ihc_style=ihc_style)
     cfp = carfac.carfac_init(cfp)
 
     _, cfp, bm_initial, _, _ = carfac.run_segment(
@@ -819,9 +823,9 @@ class CarfacTest(parameterized.TestCase):
     fs = 22050.0
     t = np.arange(0, 0.1, 1 / fs)  # Short impulse input.
     impulse = np.zeros(t.shape)
-    impulse[0] = 1e-4
+    impulse[0] = 10 ** ((27 - 94) / 20)  # Small, 27 dB SPL peak.
 
-    cfp = carfac.design_carfac(fs=fs, input_scale_dbspl=107.0)
+    cfp = carfac.design_carfac(fs=fs)
     cfp = carfac.carfac_init(cfp)
     # Run the linear case with small impulse.
     _, cfp, bm_initial, _, _ = carfac.run_segment(
@@ -851,7 +855,7 @@ class CarfacTest(parameterized.TestCase):
     self.assertLess(max_max_rel_error, 4e-4)  # More tolerance than Matlab. Why?
 
     # Run the nonlinear case with a small impulse so not too nonlinear.
-    cfp = carfac.design_carfac(fs=fs, input_scale_dbspl=107.0)
+    cfp = carfac.design_carfac(fs=fs)
     cfp = carfac.carfac_init(cfp)
     cfp.ears[0].car_coeffs.use_delay_buffer = False
     _, cfp, bm_initial, _, _ = carfac.run_segment(cfp, impulse)
@@ -876,9 +880,9 @@ class CarfacTest(parameterized.TestCase):
 
     fs = 22050.0
     t = np.arange(0, 1, 1 / fs)  # A second of noise.
-    amplitude = 1e-4  # -80 dBFS, around 20 or 30 dB SPL
+    amplitude = 10 ** ((27 - 94) / 20)  # 27 dB SPL RMS, in pascals.
     noise = amplitude * np.random.randn(len(t))
-    cfp = carfac.design_carfac(fs=fs, input_scale_dbspl=107.0)
+    cfp = carfac.design_carfac(fs=fs)
     cfp = carfac.carfac_init(cfp)
     # Run the healthy case with low-level noise.
     _, cfp, bm_baseline, _, _ = carfac.run_segment(cfp, noise)
@@ -917,16 +921,12 @@ class CarfacTest(parameterized.TestCase):
 
     fs = 22050.0
     t = np.arange(0, 1, 1 / fs)  # A second of noise.
-    # Levels assume the v1/v2 input scale of 107 dB SPL at RMS 1, as in MATLAB.
-    # TODO(JasonMH17): Use the default input_scale_dbspl once MATLAB has it.
-    amplitude = 1e-3  # -70 dBFS, around 30 or 40 dB SPL
+    amplitude = 10 ** ((47 - 94) / 20)  # 47 dB SPL RMS, in pascals.
     noise = amplitude * np.random.randn(len(t))
     two_chan_noise = np.zeros((len(t), 2))
     two_chan_noise[:, 0] = noise
     two_chan_noise[:, 1] = noise
-    cfp = carfac.design_carfac(
-        fs=fs, input_scale_dbspl=107.0, n_ears=2, ihc_style='one_cap'
-    )
+    cfp = carfac.design_carfac(fs=fs, n_ears=2, ihc_style='one_cap')
     cfp = carfac.carfac_init(cfp)
     naps, _, _, _, _ = carfac.run_segment(cfp, two_chan_noise)
     max_abs_diff = np.amax(np.abs(naps[:, :, 0] - naps[:, :, 1]))
@@ -948,7 +948,7 @@ class CarfacTest(parameterized.TestCase):
     fs = 22050.0
     t = np.arange(0, 0.05 - 1 / fs, 1 / fs)  # 50ms of times.
     t_prime = t.reshape(1, len(t))
-    amplitude = 1e-3  # -70 dBFS, around 30 or 40 dB SPL
+    amplitude = 10 ** ((47 - 94) / 20)  # Each tone peaks at 47 dB SPL.
 
     # c major chord at 4th octave . C-E-G, 523.25-659.25-783.99
     # and then a few octaves lower, at 32.7 41.2 and 49.
@@ -963,13 +963,9 @@ class CarfacTest(parameterized.TestCase):
     two_chan_noise = np.zeros((len(t), 2))
     two_chan_noise[:, 0] = c_major_chord
     # Leave the audio in channel 1 as silence.
-    cfp = carfac.design_carfac(
-        fs=fs, input_scale_dbspl=107.0, n_ears=2, ihc_style='one_cap'
-    )
+    cfp = carfac.design_carfac(fs=fs, n_ears=2, ihc_style='one_cap')
     cfp = carfac.carfac_init(cfp)
-    mono_cfp = carfac.design_carfac(
-        fs=fs, input_scale_dbspl=107.0, n_ears=1, ihc_style='one_cap'
-    )
+    mono_cfp = carfac.design_carfac(fs=fs, n_ears=1, ihc_style='one_cap')
     mono_cfp = carfac.carfac_init(mono_cfp)
 
     _, _, bm_binaural, _, _ = carfac.run_segment(cfp, two_chan_noise)
