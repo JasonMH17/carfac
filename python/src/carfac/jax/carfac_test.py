@@ -875,7 +875,7 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
     chex.assert_trees_all_close(naps, jnp.zeros_like(naps), atol=1e-5)
 
 
-  def _impair_car(self, ohc_health):
+  def _init_with_ohc_health(self, ohc_health):
     """Designs a model, sets `ohc_health` and inits it there."""
     params = carfac_jax.CarfacDesignParameters()
     hypers, weights = carfac_jax.design_carfac(params)
@@ -887,7 +887,7 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
   @jax.numpy_dtype_promotion('strict')
   def test_car_init_rest_healthy(self):
     """With `ohc_health` of 1, the CAR starts at the design's rest."""
-    _, hypers, _, state = self._impair_car(1.0)
+    _, hypers, _, state = self._init_with_ohc_health(1.0)
     car_hypers = hypers.ears[0].car
     car_state = state.ears[0].car
     chex.assert_trees_all_equal(car_state.zb_memory, car_hypers.zr_coeffs)
@@ -900,7 +900,7 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
   @parameterized.named_parameters(('scalar', 0.5), ('ramp', None))
   @jax.numpy_dtype_promotion('strict')
   def test_car_init_rest(self, ohc_health):
-    """An impaired CAR should start at rest, with no start-up transient.
+    """With lower `ohc_health`, the CAR starts at rest, with no transient.
 
     Compares against the same model started from a state settled on silence,
     and against a CAR state left at the healthy start.
@@ -912,7 +912,7 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
     n_ch = carfac_jax.design_carfac(params)[0].ears[0].n_ch
     if ohc_health is None:
       ohc_health = jnp.linspace(0.2, 0.9, n_ch)
-    params, hypers, weights, state = self._impair_car(ohc_health)
+    params, hypers, weights, state = self._init_with_ohc_health(ohc_health)
 
     # About 1 s of silence, a multiple of the AGC decimation so the settled
     # state's `decim_phase` matches the start.
