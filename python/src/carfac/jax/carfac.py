@@ -474,7 +474,7 @@ class IhcWeights:
   out_rate: float | jnp.ndarray = 0.0
   in_rate: float = 0.0
 
-  # Impairment weight, 1 when healthy. The voltage cap1 recharges toward in the
+  # Health weight, 1 when healthy. The voltage cap1 recharges toward in the
   # two-cap IHC, so lowering it reduces the receptor driving force.
   battery: float | jnp.ndarray = 1.0
 
