@@ -469,7 +469,7 @@ class IhcWeights:
   out_rate: float | jnp.ndarray = 0.0
   in_rate: float = 0.0
 
-  # Impairment weight, 1 when healthy. Scales `bm_out` before the detection
+  # Health weight, 1 when healthy. Scales `bm_out` before the detection
   # nonlinearity, for every IHC style.
   drive_gain: float | jnp.ndarray = 1.0
 

@@ -726,13 +726,13 @@ class CarfacStrictPromotionTest(parameterized.TestCase):
     hypers, weights, state = carfac_jax.design_and_init_carfac(params)
     n_ch = hypers.ears[0].n_ch
     drive_gain = jnp.linspace(0.25, 1.0, n_ch)
-    impaired = self._replace_ihc(weights, drive_gain=drive_gain)
+    scaled = self._replace_ihc(weights, drive_gain=drive_gain)
     bm_out = 0.1 * jax.random.normal(jax.random.PRNGKey(0), (n_ch,))
 
     out = carfac_jax.ihc_step(
         bm_out,
         hypers.ears[0].ihc,
-        impaired.ears[0].ihc,
+        scaled.ears[0].ihc,
         copy.deepcopy(state.ears[0].ihc),
     )
     expected = carfac_jax.ihc_step(
